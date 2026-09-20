@@ -1,0 +1,10 @@
+.git
+.circleci
+.venv
+__pycache__
+.pytest_cache
+tests
+test-results
+dist
+README.md
+requirements-dev.txt

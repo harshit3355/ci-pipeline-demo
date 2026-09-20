@@ -1,0 +1,58 @@
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.12.10
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - python-deps-v1-{{ checksum "requirements-dev.txt" }}
+            - python-deps-v1-
+      - run:
+          name: Install pinned test dependencies
+          command: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - save_cache:
+          key: python-deps-v1-{{ checksum "requirements-dev.txt" }}
+          paths:
+            - ~/.cache/pip
+      - run:
+          name: Run unit tests and create JUnit report
+          command: |
+            mkdir -p test-results
+            pytest --junitxml=test-results/junit.xml
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: test-results
+          destination: test-results
+
+  build-image:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build image tagged with the commit SHA
+          command: >-
+            docker build --pull
+            --build-arg APP_VERSION=${CIRCLE_SHA1}
+            --tag ci-pipeline-demo:${CIRCLE_SHA1} .
+      - run:
+          name: Save image as a CI artifact
+          command: |
+            mkdir -p dist
+            docker save --output dist/ci-pipeline-demo-${CIRCLE_SHA1}.tar ci-pipeline-demo:${CIRCLE_SHA1}
+      - store_artifacts:
+          path: dist
+          destination: docker-image
+
+workflows:
+  validate-and-package:
+    jobs:
+      - test
+      - build-image:
+          requires:
+            - test

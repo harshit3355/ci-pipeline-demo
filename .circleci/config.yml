@@ -1,58 +1,191 @@
 version: 2.1
 
 jobs:
-  test:
+  static-analysis:
     docker:
-      - image: cimg/python:3.12.10
+      - image: cimg/python:3.12.14
     steps:
       - checkout
       - restore_cache:
           keys:
-            - python-deps-v1-{{ checksum "requirements-dev.txt" }}
-            - python-deps-v1-
+            - python-dev-v2-{{ checksum "requirements-dev.txt" }}
+            - python-dev-v2-
       - run:
-          name: Install pinned test dependencies
+          name: Install pinned analysis tools
           command: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - save_cache:
-          key: python-deps-v1-{{ checksum "requirements-dev.txt" }}
+          key: python-dev-v2-{{ checksum "requirements-dev.txt" }}
           paths:
             - ~/.cache/pip
       - run:
-          name: Run unit tests and create JUnit report
-          command: |
-            mkdir -p test-results
-            pytest --junitxml=test-results/junit.xml
-      - store_test_results:
-          path: test-results
+          name: Create report directory
+          command: mkdir -p reports
+      - run:
+          name: Lint Python source
+          command: ruff check --output-format=github .
+      - run:
+          name: Check Python formatting
+          command: ruff format --check .
+      - run:
+          name: Run Bandit static security analysis
+          command: bandit --recursive src --severity-level medium --confidence-level medium --format json --output reports/bandit.json
       - store_artifacts:
-          path: test-results
-          destination: test-results
+          path: reports/bandit.json
+          destination: security/bandit.json
 
-  build-image:
+  dependency-audit:
     docker:
-      - image: cimg/base:stable
+      - image: cimg/python:3.12.14
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - python-dev-v2-{{ checksum "requirements-dev.txt" }}
+            - python-dev-v2-
+      - run:
+          name: Install pinned audit tools
+          command: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - run:
+          name: Audit Python dependencies for published vulnerabilities
+          command: |
+            mkdir -p reports
+            pip-audit \
+              --requirement requirements-dev.txt \
+              --progress-spinner off \
+              --format json | tee reports/pip-audit.json
+      - store_artifacts:
+          path: reports/pip-audit.json
+          destination: security/pip-audit.json
+
+  unit-tests:
+    docker:
+      - image: cimg/python:3.12.14
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - python-dev-v2-{{ checksum "requirements-dev.txt" }}
+            - python-dev-v2-
+      - run:
+          name: Install pinned test tools
+          command: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - run:
+          name: Run tests with a coverage gate
+          command: |
+            mkdir -p reports
+            pytest \
+              --cov=src \
+              --cov-report=term-missing \
+              --cov-report=xml:reports/coverage.xml \
+              --cov-fail-under=80 \
+              --junitxml=reports/junit.xml
+      - store_test_results:
+          path: reports/junit.xml
+      - store_artifacts:
+          path: reports/coverage.xml
+          destination: coverage/coverage.xml
+
+  build-scan-package:
+    docker:
+      - image: cimg/base:2026.09
+    resource_class: medium
     steps:
       - checkout
       - setup_remote_docker
       - run:
-          name: Build image tagged with the commit SHA
-          command: >-
-            docker build --pull
-            --build-arg APP_VERSION=${CIRCLE_SHA1}
-            --tag ci-pipeline-demo:${CIRCLE_SHA1} .
-      - run:
-          name: Save image as a CI artifact
+          name: Build image tagged with the source commit
           command: |
-            mkdir -p dist
-            docker save --output dist/ci-pipeline-demo-${CIRCLE_SHA1}.tar ci-pipeline-demo:${CIRCLE_SHA1}
+            docker build --pull \
+              --build-arg APP_VERSION="${CIRCLE_SHA1}" \
+              --label org.opencontainers.image.source="https://github.com/harshit3355/ci-pipeline-demo" \
+              --label org.opencontainers.image.revision="${CIRCLE_SHA1}" \
+              --tag "ci-pipeline-demo:${CIRCLE_SHA1}" .
+      - run:
+          name: Smoke-test the built container
+          command: |
+            set -euo pipefail
+            image="ci-pipeline-demo:${CIRCLE_SHA1}"
+            container="ci-pipeline-demo-smoke"
+            cleanup() {
+              docker rm --force "${container}" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            docker run --detach --name "${container}" "${image}"
+            for attempt in $(seq 1 30); do
+              if docker exec "${container}" python -c \
+                "import json, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2); assert json.load(response) == {'status': 'ok'}" \
+                >/dev/null 2>&1; then
+                echo "Container health endpoint is ready."
+                exit 0
+              fi
+              sleep 1
+            done
+            docker logs "${container}"
+            echo "Container did not become healthy within 30 seconds." >&2
+            exit 1
+      - run:
+          name: Export image for scanning and review
+          command: |
+            mkdir -p dist reports
+            docker save \
+              --output "dist/ci-pipeline-demo-${CIRCLE_SHA1}.tar" \
+              "ci-pipeline-demo:${CIRCLE_SHA1}"
+      - run:
+          name: Install and verify pinned Trivy scanner
+          command: |
+            set -euo pipefail
+            trivy_version="0.74.0"
+            trivy_archive="trivy_${trivy_version}_Linux-64bit.tar.gz"
+            release_url="https://github.com/aquasecurity/trivy/releases/download/v${trivy_version}"
+            curl --fail --silent --show-error --location "${release_url}/${trivy_archive}" --output "/tmp/${trivy_archive}"
+            curl --fail --silent --show-error --location "${release_url}/trivy_${trivy_version}_checksums.txt" --output /tmp/trivy_checksums.txt
+            (cd /tmp && grep " ${trivy_archive}$" trivy_checksums.txt | sha256sum --check --strict)
+            tar --extract --gzip --file "/tmp/${trivy_archive}" --directory /tmp trivy
+            chmod 0755 /tmp/trivy
+      - run:
+          name: Scan repository configuration and source
+          command: |
+            /tmp/trivy fs \
+              --scanners secret,misconfig \
+              --skip-dirs .git \
+              --severity HIGH,CRITICAL \
+              --exit-code 1 \
+              --format sarif \
+              --output reports/trivy-filesystem.sarif \
+              .
+      - run:
+          name: Scan image for high and critical vulnerabilities
+          command: |
+            /tmp/trivy image \
+              --input "dist/ci-pipeline-demo-${CIRCLE_SHA1}.tar" \
+              --scanners vuln \
+              --ignore-unfixed \
+              --severity HIGH,CRITICAL \
+              --exit-code 1 \
+              --format sarif \
+              --output reports/trivy-image.sarif
+      - run:
+          name: Generate CycloneDX software bill of materials
+          command: |
+            /tmp/trivy image \
+              --input "dist/ci-pipeline-demo-${CIRCLE_SHA1}.tar" \
+              --format cyclonedx \
+              --output reports/sbom.cdx.json
+      - store_artifacts:
+          path: reports
+          destination: supply-chain
       - store_artifacts:
           path: dist
-          destination: docker-image
+          destination: container-image
 
 workflows:
-  validate-and-package:
+  pull-request-and-main-gates:
     jobs:
-      - test
-      - build-image:
+      - static-analysis
+      - dependency-audit
+      - unit-tests
+      - build-scan-package:
           requires:
-            - test
+            - static-analysis
+            - dependency-audit
+            - unit-tests

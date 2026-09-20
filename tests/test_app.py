@@ -10,6 +10,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from src import app
 from src.app import create_server
 
 
@@ -52,3 +53,23 @@ def test_unknown_path_returns_json_404(service_url: str) -> None:
 
     assert error.value.code == 404
     assert json.load(error.value) == {"error": "not found"}
+
+
+def test_main_starts_and_closes_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeServer:
+        closed = False
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            self.closed = True
+
+    server = FakeServer()
+    monkeypatch.setenv("APP_PORT", "9099")
+    monkeypatch.setattr(app, "create_server", lambda port: server)
+    monkeypatch.setattr(app.logging, "basicConfig", lambda **kwargs: None)
+
+    app.main()
+
+    assert server.closed is True

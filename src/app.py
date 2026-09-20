@@ -43,12 +43,13 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
 
 
 def create_server(
-    host: str = "0.0.0.0",
+    host: str | None = None,
     port: int = 8080,
     version: str | None = None,
 ) -> ThreadingHTTPServer:
     """Create the HTTP server; the injectable bind address supports tests."""
-    server = ThreadingHTTPServer((host, port), DemoRequestHandler)
+    bind_host = host or os.environ.get("APP_HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((bind_host, port), DemoRequestHandler)
     server.app_version = version or os.environ.get("APP_VERSION", "dev")  # type: ignore[attr-defined]
     return server
 

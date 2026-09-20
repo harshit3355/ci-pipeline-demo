@@ -47,7 +47,7 @@ def create_server(
     version: str | None = None,
 ) -> ThreadingHTTPServer:
     """Create the HTTP server; the injectable bind address supports tests."""
-    bind_host = host or os.environ.get("APP_HOST", "0.0.0.0")
+    bind_host = host or os.environ.get("APP_HOST", "127.0.0.1")
     server = ThreadingHTTPServer((bind_host, port), DemoRequestHandler)
     server.app_version = version or os.environ.get("APP_VERSION", "dev")  # type: ignore[attr-defined]
     return server

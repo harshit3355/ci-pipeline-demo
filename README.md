@@ -36,6 +36,7 @@ The project pins direct Python tool versions, the Python patch tag, and CircleCI
 - `GET /` returns the service message and `APP_VERSION`.
 - `GET /health` returns `{"status":"ok"}` for container/orchestrator health checks.
 - Other paths return a JSON 404 response.
+- The app defaults to loopback (`127.0.0.1`) when run directly. The Docker image explicitly sets `APP_HOST=0.0.0.0` so published container ports can reach the service.
 
 The service uses Python's standard library at runtime. Test and security tools are isolated in `requirements-dev.txt` and are not copied into the runtime image.
 

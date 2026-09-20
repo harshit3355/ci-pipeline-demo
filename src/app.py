@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import os
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 
